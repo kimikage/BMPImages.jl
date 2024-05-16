@@ -1,0 +1,39 @@
+name = "BMPImages"
+uuid = "6eb60396-1cd7-48e0-9b1b-c01b15227c0d"
+version = "0.1.0"
+
+[deps]
+Colors = "5ae59095-9a9b-59fe-a467-6f913c188581"
+Requires = "ae029012-a4dd-5104-9daa-d747884805df"
+UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
+
+[weakdeps]
+FileIO = "5789e2e9-d7fb-5bc7-8068-2c6fae9b9549"
+Requires = "ae029012-a4dd-5104-9daa-d747884805df"
+UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
+
+[extensions]
+BMPImagesFileIOExt = ["FileIO", "UUIDs"]
+
+[compat]
+Aqua = "0.8"
+Colors = "0.12"
+FileIO = "1.6"
+ImageMagick = "0.7, 1"
+Pkg = "< 0.0.1, 1"
+Requires = "1"
+Test = "< 0.0.1, 1"
+TestImages = "0.6, 1"
+UUIDs = "< 0.0.1, 1"
+julia = "1"
+
+[extras]
+Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
+FileIO = "5789e2e9-d7fb-5bc7-8068-2c6fae9b9549"
+ImageMagick = "6218d12a-5da1-5696-b52f-db25d2ecc6d1"
+Pkg = "44cfe95a-1eb2-52ea-b672-e2afdf69b78f"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+TestImages = "5e47fb64-e119-507b-a336-dd2b206d9990"
+
+[targets]
+test = ["Aqua", "FileIO", "ImageMagick", "Pkg", "Test", "TestImages"]
