@@ -9,6 +9,96 @@ if !isdefined(Main, :bmppath)
     outpath(name) = joinpath(@__DIR__, "out", name)
 end
 
+@testset "read_bmp_rle8! / read_bmp_rle4!" begin
+    def = Gray(reinterpret(N0f8, 0xa5))
+
+    # cf. https://learn.microsoft.com/windows/win32/gdi/bitmap-compression
+    buf8 = [
+        0x03, 0x04,
+        0x05, 0x06,
+        0x00, 0x03, 0x45, 0x56, 0x67, 0x00, # the last 0x00 is a padding.
+        0x02, 0x78,
+        0x00, 0x02, 0x05, 0x01, # move current position 5 right and 1 up
+        0x02, 0x78,
+        0x00, 0x00, # EOL
+        0x09, 0x1e,
+        0x00, 0x01, # EOB
+    ]
+
+    expected8 = UInt8[
+        0x1e 0x1e 0x1e 0x1e 0x1e 0x1e 0x1e 0x1e 0x1e    0    0    0    0 0 0 0 0    0    0;
+           0    0    0    0    0    0    0    0    0    0    0    0    0 0 0 0 0 0x78 0x78;
+        0x04 0x04 0x04 0x06 0x06 0x06 0x06 0x06 0x45 0x56 0x67 0x78 0x78 0 0 0 0    0    0;
+    ]
+
+    h8 = BMPImageHeader()
+    h8.height, h8.width = size(expected8)
+    h8.bitcount = 8
+    h8.colortable = BMPImages.grayscaletable(8)
+    img8 = fill(def, size(expected8))
+    BMPImages.read_bmp_rle8!(IOBuffer(buf8), img8, h8)
+    @test all(reinterpret(UInt8, img8) .== expected8)
+
+    buf4 = [
+        0x03, 0x04,
+        0x05, 0x06,
+        0x00, 0x06, 0x45, 0x56, 0x67, 0x00, # the last 0x00 is a padding.
+        0x04, 0x78,
+        0x00, 0x02, 0x05, 0x01, # move current position 5 right and 1 up
+        0x04, 0x78,
+        0x00, 0x00, # EOL
+        0x09, 0x1e,
+        0x00, 0x01, # EOB
+    ]
+
+    expected4 = UInt8[
+        0x1 0xe 0x1 0xe 0x1 0xe 0x1 0xe 0x1   0   0   0   0   0   0   0   0   0 0 0 0 0   0   0   0   0;
+          0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0 0 0 0 0 0x7 0x8 0x7 0x8;
+        0x0 0x4 0x0 0x0 0x6 0x0 0x6 0x0 0x4 0x5 0x5 0x6 0x6 0x7 0x7 0x8 0x7 0x8 0 0 0 0   0   0   0   0;
+    ] .* 0x11
+
+    h4 = BMPImageHeader()
+    h4.height, h4.width = size(expected4)
+    h4.bitcount = 4
+    h4.colortable = BMPImages.grayscaletable(4)
+    img4 = fill(def, size(expected4))
+    BMPImages.read_bmp_rle4!(IOBuffer(buf4), img4, h4)
+    @test all(reinterpret(UInt8, img4) .== expected4)
+
+    buf4x = [0x00, 0x06, 0x12, 0x34, 0x56, 0x00, 0x00, 0x01] # The actual width is 5.
+    h4x = BMPImageHeader()
+    h4x.height = 1
+    h4x.width = 5
+    h4x.bitcount = 4
+    h4x.colortable = BMPImages.grayscaletable(4)
+    img4x = fill(def, 1, 5)
+    BMPImages.read_bmp_rle4!(IOBuffer(buf4x), img4x, h4x)
+    @test all(reinterpret(UInt8, img4x) .== ([0x1 0x2 0x3 0x4 0x5] .* 0x11))
+
+    buf4eoleob = [0x00, 0x05, 0x12, 0x34, 0x56, 0x00, 0x00, 0x00, 0x00, 0x01]
+    io = IOBuffer(buf4eoleob)
+    BMPImages.read_bmp_rle4!(io, img4x, h4x)
+    @test all(reinterpret(UInt8, img4x) .== ([0x1 0x2 0x3 0x4 0x5] .* 0x11))
+
+    buf4underrun = [0x00, 0x04, 0x12, 0x34, 0x00, 0x00, 0x00, 0x01]
+    io = IOBuffer(buf4underrun)
+    BMPImages.read_bmp_rle4!(io, img4x, h4x)
+    @test all(reinterpret(UInt8, img4x) .== ([0x1 0x2 0x3 0x4 0x0] .* 0x11))
+
+    E = ErrorException
+    buf4overrun = [0x00, 0x07, 0x12, 0x34, 0x56, 0x00, 0x00, 0x01]
+    io = IOBuffer(buf4overrun)
+    @test_throws E("invalid line termination") BMPImages.read_bmp_rle4!(io, img4x, h4x)
+
+    buf4noeol = [0x00, 0x05, 0x12, 0x34, 0x56, 0x00, 0x00, 0x02]
+    io = IOBuffer(buf4noeol)
+    @test_throws E("invalid line termination") BMPImages.read_bmp_rle4!(io, img4x, h4x)
+
+    buf4noeob = [0x00, 0x05, 0x12, 0x34, 0x56, 0x00, 0x00, 0x00, 0x01]
+    io = IOBuffer(buf4noeob)
+    @test_throws E("invalid bitmap termination") BMPImages.read_bmp_rle4!(io, img4x, h4x)
+end
+
 @testset "rgb888_v3" begin
     h = read_bmp_header(bmppath("rgb888_v3"))
 
@@ -330,6 +420,117 @@ end
     imgr = ImageMagick.load(bmppath("xrgb1555_v3"))
     # ImageMagick seems to have inaccurate rounding.
     @test all(img .≈ ImageMagick.load(bmppath("xrgb1555_v3")))
+end
+
+@testset "rgb888_rle8_55_v3" begin
+    h = read_bmp_header(bmppath("rgb888_rle8_55_v3"))
+
+    @test h.signature === UInt16('B') | bswap(UInt16('M'))
+    @test h.filesize === 0x0000_01cc
+    @test h.offset === 0x0000_0036 + UInt32(55 * 4)
+    @test h.headersize === UInt32(40)
+    @test h.width === Int32(13)
+    @test h.height === Int32(11)
+    @test h.planes === 0x0001
+    @test h.bitcount === UInt16(8)
+    @test h.compression === BMPImages.BI_RLE8
+    @test h.imagesize === 0x0000_00ba
+    @test h.xppm === h.yppm === Int32(fld(96 * 1000, 25.4))
+    @test h.colors_used === UInt32(55)
+    @test h.colors_important === UInt32(55)
+
+    @test length(h.colortable) == 55
+    @test h.colortable[1] === RGB{N0f8}(0.22, 0.596, 0.149)
+    @test h.colortable[55] === RGB{N0f8}(1, 1, 1)
+
+    img = read_bmp(bmppath("rgb888_rle8_55_v3"))
+    ImageMagick.save(outpath("rgb888_rle8_55_v3.png"), img)
+
+    @test img == ImageMagick.load(bmppath("rgb888_rle8_55_v3"))
+end
+
+@testset "rgb888_rle8_gray_v3" begin
+    h = read_bmp_header(bmppath("rgb888_rle8_gray_v3"))
+
+    @test h.signature === UInt16('B') | bswap(UInt16('M'))
+    @test h.filesize === 0x0000_04ec
+    @test h.offset === 0x0000_0036 + UInt32(256 * 4)
+    @test h.headersize === UInt32(40)
+    @test h.width === Int32(13)
+    @test h.height === Int32(11)
+    @test h.planes === 0x0001
+    @test h.bitcount === UInt16(8)
+    @test h.compression === BMPImages.BI_RLE8
+    @test h.imagesize === 0x0000_00b6
+    @test h.xppm === h.yppm === Int32(fld(96 * 1000, 25.4))
+    @test h.colors_used === UInt32(0) # => 256
+    @test h.colors_important === UInt32(0)
+
+    @test length(h.colortable) == 256
+    @test h.colortable[1] === Gray{N0f8}(0)
+    @test h.colortable[256] === Gray{N0f8}(1)
+
+    img = read_bmp(bmppath("rgb888_rle8_gray_v3"))
+    @test img isa Matrix{Gray{N0f8}}
+    ImageMagick.save(outpath("rgb888_rle8_gray_v3.png"), img)
+
+    @test RGB{N0f8}.(img) == ImageMagick.load(bmppath("rgb888_rle8_gray_v3"))
+end
+
+@testset "rgb888_rle4_16_v3" begin
+    h = read_bmp_header(bmppath("rgb888_rle4_16_v3"))
+
+    @test h.signature === UInt16('B') | bswap(UInt16('M'))
+    @test h.filesize === 0x0000_00fc
+    @test h.offset === 0x0000_0036 + UInt32(16 * 4)
+    @test h.headersize === UInt32(40)
+    @test h.width === Int32(13)
+    @test h.height === Int32(11)
+    @test h.planes === 0x0001
+    @test h.bitcount === UInt16(4)
+    @test h.compression === BMPImages.BI_RLE4
+    @test h.imagesize === 0x0000_0086
+    @test h.xppm === h.yppm === Int32(fld(96 * 1000, 25.4))
+    @test h.colors_used === UInt32(0) # => 16
+    @test h.colors_important === UInt32(0)
+
+    @test length(h.colortable) == 16
+    @test h.colortable[1] === RGB{N0f8}(0.278, 0.627, 0.212)
+    @test h.colortable[16] === RGB{N0f8}(1, 1, 1)
+
+    img = read_bmp(bmppath("rgb888_rle4_16_v3"))
+    ImageMagick.save(outpath("rgb888_rle4_16_v3.png"), img)
+
+    @test img == ImageMagick.load(bmppath("rgb888_rle4_16_v3"))
+end
+
+@testset "rgb888_rle4_gray_v3" begin
+    h = read_bmp_header(bmppath("rgb888_rle4_gray_v3"))
+
+    @test h.signature === UInt16('B') | bswap(UInt16('M'))
+    @test h.filesize === 0x0000_00fc
+    @test h.offset === 0x0000_0036 + UInt32(16 * 4)
+    @test h.headersize === UInt32(40)
+    @test h.width === Int32(13)
+    @test h.height === Int32(11)
+    @test h.planes === 0x0001
+    @test h.bitcount === UInt16(4)
+    @test h.compression === BMPImages.BI_RLE4
+    @test h.imagesize === 0x0000_0086
+    @test h.xppm === h.yppm === Int32(fld(96 * 1000, 25.4))
+    @test h.colors_used === UInt32(0) # => 16
+    @test h.colors_important === UInt32(0)
+
+    @test length(h.colortable) == 16
+    @test h.colortable[1] === Gray{N0f8}(0)
+    @test h.colortable[16] === Gray{N0f8}(1)
+
+    img = read_bmp(bmppath("rgb888_rle4_gray_v3"))
+    @test img isa Matrix{Gray{N0f8}}
+    # ImageMagick.save(outpath("rgb888_rle4_gray_v3.png"), img) # Some versions have bugs.
+    save(outpath("rgb888_rle4_gray_v3.png"), img)
+
+    @test RGB{N0f8}.(img) == ImageMagick.load(bmppath("rgb888_rle4_gray_v3"))
 end
 
 @testset "rgb888_os2" begin
