@@ -124,7 +124,9 @@ function read_bmp_header(io::IO)
                 error("invalid compression mode: " * repr(comp32))
             end
         end
-        if h.compression in (BI_RGB,)
+        if h.compression === BI_RGB
+        elseif h.compression === BI_RLE8 && h.bitcount == 8
+        elseif h.compression === BI_RLE4 && h.bitcount == 4
         else
             error("unsupported compression mode: " * repr(comp32))
         end
@@ -143,7 +145,7 @@ function read_bmp_header(io::IO)
     end
     read_infoheader()
 
-    if h.compression === BI_RGB
+    if h.compression in (BI_RGB, BI_RLE8, BI_RLE4)
         max_table_size = h.offset - h.headersize - 0xe
         ncolors_max = Int64(1) << h.bitcount
         ncolors = iszero(h.colors_used) ? ncolors_max : Int(h.colors_used)
@@ -315,6 +317,136 @@ function read_bmp_idx1!(io::IO,
     end
 end
 
+function _read_bmp_rle!(depth::Union{Val{4}, Val{8}}, io::IO,
+    image::Matrix{C},
+    header::BMPImageHeader) where {C <: Union{AbstractRGB, AbstractGray}}
+
+    check_mat_size(image, header)
+    table = gen_colortable(C, header)
+
+    local run::UInt8 = 0x00
+    local runcount::UInt8 = 0x00
+    local idx::UInt8 = 0x00
+    local absolute::Bool = false
+    local eob::Bool = false
+    local eol::Bool = false
+    local deltay::UInt8 = 0x00
+    local dest_x::UInt32 = 0
+    local i::UInt32 = 0
+    function reset_ctx()
+        absolute = false
+        deltay = 0x00
+        dest_x = 0
+        run = 0x00
+        runcount = 0x00
+    end
+    skipping() = (eol | eob) || deltay > 0x0 || i < dest_x
+    function skip_pad()
+        nbytes = depth === Val(4) ? (run + 0x1) >> 0x1 : run
+        absolute && isodd(nbytes) && skip(io, 1)
+    end
+
+    for y in axis_y(image, header)
+        eol = false
+        absolute = false
+        runcount = run # force reset
+        deltay -= deltay > 0x00
+        i = 0
+        for x in axes(image, 2)
+            if skipping()
+            elseif run === runcount
+                skip_pad()
+                reset_ctx()
+                b1 = read(io, UInt8)
+                if b1 === 0x00
+                    idx = 0x00
+                    b2 = read(io, UInt8)
+                    if b2 === 0x00 # end of line (before the actual EOL)
+                        eol = true
+                    elseif b2 === 0x01 # end of bitmap (before the actual EOB)
+                        eob = true
+                    elseif b2 === 0x02
+                        deltax = read(io, UInt8)
+                        deltay = read(io, UInt8)
+                        iszero(deltax | deltay) && error("delta (0, 0) is not supported.")
+                        dest_x = deltax + i - 0x1
+                    else # absolute mode
+                        absolute = true
+                        run = b2
+                        idx = read(io, UInt8)
+                    end
+                else # encoding mode
+                    run = b1
+                    idx = read(io, UInt8)
+                end
+            elseif absolute
+                if depth === Val(4) && isodd(runcount)
+                else
+                    idx = read(io, UInt8)
+                end
+            end
+
+            if depth === Val(4)
+                idxn = isodd(runcount) ? idx & 0xf : idx >> 0x4
+            else
+                idxn = idx
+            end
+            @inbounds image[y, x] = table[idxn + 1]
+            runcount += run > runcount
+            i += 0x1
+        end
+        if !skipping()
+            # For 4-bit images, some encoder implementations seem to extend
+            # the buffer to an even width.
+            if run === runcount || (depth === Val(4) && run === ((runcount + 0x1) & 0xfe))
+                skip_pad()
+            else
+                error("invalid line termination")
+            end
+            b1 = read(io, UInt8)
+            b2 = b1 === 0x00 ? read(io, UInt8) : 0xff
+            b2 <= 0x01 || error("invalid line termination")
+            eob = b2 === 0x01
+        end
+    end
+    if !eob
+        b1 = read(io, UInt8)
+        b2 = b1 === 0x00 ? read(io, UInt8) : 0xff
+        b2 === 0x01 || error("invalid bitmap termination")
+    end
+end
+
+"""
+    read_bmp_rle8!(io, image, header)
+
+Load 8-bit RLE image from `io` to `image`.
+
+!!! note
+    In the RLE mode, some pixel value settings can be skipped.
+    However, there is no clear specification on handling the skipped pixels.
+    In this function, the skipped pixels are filled with the color of index `0`.
+"""
+function read_bmp_rle8!(io::IO,
+    image::Matrix{C},
+    header::BMPImageHeader) where {C <: Union{AbstractRGB, AbstractGray}}
+
+    _read_bmp_rle!(Val(8), io, image, header)
+end
+
+"""
+    read_bmp_rle4!(io, image, header)
+
+Load 4-bit RLE image from `io` to `image`.
+
+See also [`read_bmp_rle8!`](@ref).
+"""
+function read_bmp_rle4!(io::IO,
+    image::Matrix{C},
+    header::BMPImageHeader) where {C <: Union{AbstractRGB, AbstractGray}}
+
+    _read_bmp_rle!(Val(4), io, image, header)
+end
+
 """
     read_bmp(filepath::AbstractString; kwargs...)
     read_bmp(io::IO; kwargs...)
@@ -355,10 +487,14 @@ function read_bmp(io::IO; kwargs...)
     compress = header.compression
     if bpp == 24
         read_bmp_rgb888!(io, image, header)
-    elseif bpp == 8
+    elseif bpp == 8 && compress === BI_RGB
         read_bmp_idx8!(io, image, header)
-    elseif bpp == 4
+    elseif bpp == 8 && compress === BI_RLE8
+        read_bmp_rle8!(io, image, header)
+    elseif bpp == 4 && compress === BI_RGB
         read_bmp_idx4!(io, image, header)
+    elseif bpp == 4 && compress === BI_RLE4
+        read_bmp_rle4!(io, image, header)
     elseif bpp == 1
         read_bmp_idx1!(io, image, header)
     elseif bpp == 32 && compress === BI_RGB
